@@ -1,269 +1,109 @@
-const STORAGE_KEY = 'indiqai-card-prototype-v1';
-const DEMO = {
-  card: { name: 'Café Aurora', value: 20, goal: 8, reward: 'Café especial', theme: 'purple' },
-  draft: { name: 'Café Aurora', value: 20, goal: 8, reward: 'Café especial', theme: 'purple' },
-  totalStamps: 3,
-  redeemedRewards: 0,
-  events: [],
-  published: false
-};
-
-const ICON = {
-  arrow: '<svg class="button-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 10h12m-5-5 5 5-5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-  stamp: '<svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="m8 16 5 5L24 10" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-  gift: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="9" width="18" height="12" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M12 9v12M3 13h18M12 9C8.2 9 6 7.7 6 5.7c0-1.4 1-2.4 2.3-2.4C10 3.3 11.4 5 12 9Zm0 0c3.8 0 6-1.3 6-3.3 0-1.4-1-2.4-2.3-2.4C14 3.3 12.6 5 12 9Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>'
-};
-
-const app = document.querySelector('#app');
-const toast = document.querySelector('#toast');
-let toastTimer;
-let step = 1;
-let quantity = 1;
-let lastAward = 0;
-let awardLocked = false;
-
-function clone(value) { return JSON.parse(JSON.stringify(value)); }
-function loadState() {
-  try {
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (stored && stored.card && stored.draft && Number.isFinite(stored.totalStamps)) return stored;
-  } catch (_) { /* A demonstração volta ao estado inicial. */ }
-  return clone(DEMO);
-}
-let state = loadState();
-function save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
-function esc(value) { return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function money(value) { return new Intl.NumberFormat('pt-BR', {style:'currency',currency:'BRL',maximumFractionDigits:0}).format(Number(value) || 0); }
-function initials(name) { return String(name || 'IndiqAI').trim().split(/\s+/).slice(0,2).map(w => w[0]?.toUpperCase() || '').join(''); }
-function route() { const r = location.hash.replace(/^#/, '').split('?')[0]; return ['inicio','criar','cliente','gestor'].includes(r) ? r : 'inicio'; }
-function encodeCard(card) {
-  const bytes = new TextEncoder().encode(JSON.stringify(card));
-  return btoa(String.fromCharCode(...bytes)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
-}
-function sharedCardFromHash() {
-  const encoded = new URLSearchParams(location.hash.split('?')[1] || '').get('card');
-  if (!encoded || encoded.length > 1000) return null;
-  try {
-    const base64 = encoded.replace(/-/g,'+').replace(/_/g,'/');
-    const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
-    const card = JSON.parse(new TextDecoder().decode(bytes));
-    if (typeof card.name !== 'string' || !card.name.trim() || card.name.length > 32 ||
-        typeof card.reward !== 'string' || !card.reward.trim() || card.reward.length > 32 ||
-        !Number.isInteger(card.value) || card.value < 1 || card.value > 10000 ||
-        !Number.isInteger(card.goal) || card.goal < 1 || card.goal > 12 ||
-        !['purple','berry','night'].includes(card.theme)) return null;
-    return card;
-  } catch (_) { return null; }
-}
-function applySharedCard() {
-  if (route() !== 'cliente') return;
-  const incoming = sharedCardFromHash();
-  if (!incoming || JSON.stringify(incoming) === JSON.stringify(state.card)) return;
-  state.card = incoming;
-  state.draft = clone(incoming);
-  state.totalStamps = 0;
-  state.redeemedRewards = 0;
-  state.events = [];
-  state.published = true;
-  save();
-}
-function shareUrl() { return `${location.href.split('#')[0]}#cliente?card=${encodeCard(state.card)}`; }
-function onlineUrl() { return /^https?:$/.test(location.protocol); }
-function progress() { return Math.max(0, state.totalStamps - state.redeemedRewards * state.card.goal); }
-function availableRewards() { return Math.max(0, Math.floor(state.totalStamps / state.card.goal) - state.redeemedRewards); }
-function notify(message) {
-  toast.textContent = message;
-  toast.classList.add('is-visible');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.classList.remove('is-visible'), 3100);
-}
-
-function header(current) {
-  const items = [['inicio','Início'],['criar','Criar cartão'],['cliente','Cliente'],['gestor','Gestor']];
-  const links = items.map(([id,label]) => `<a href="#${id}" ${current===id?'aria-current="page"':''}>${label}</a>`).join('');
-  return `<header class="topbar">
-    <a class="wordmark" href="#inicio" aria-label="IndiqAI, ir para início"><span class="brand-icon" aria-hidden="true"></span><span>Indiq<em>AI</em></span></a>
-    <nav class="topnav" aria-label="Navegação principal">${links}</nav>
-    <span class="demo-flag"><span class="demo-dot"></span> PROTÓTIPO · DADOS FICTÍCIOS</span>
-  </header><nav class="mobile-nav" aria-label="Navegação principal no celular">${links}</nav>`;
-}
-
-function footer() {
-  return `<footer class="footer"><span>Uma demonstração local. Nenhum dado é enviado.</span><button type="button" data-action="reset">Recomeçar demonstração</button></footer>`;
-}
-
-function cardVisual(card, filled = 0, animated = 0) {
-  const goal = Math.max(1, Math.min(12, Number(card.goal) || 8));
-  const count = Math.min(goal, Math.max(0, Number(filled) || 0));
-  const stamps = Array.from({length:goal}, (_,i) => {
-    const isFilled = i < count;
-    const isNew = isFilled && i >= Math.max(0, count - animated);
-    return `<span class="stamp ${isFilled?'is-filled':''} ${isNew?'is-new':''}" aria-label="${isFilled?'Carimbo recebido':'Carimbo vazio'}">${isFilled?ICON.stamp:''}</span>`;
-  }).join('');
-  return `<article class="loyalty-card" data-theme="${esc(card.theme)}" aria-label="Cartão fidelidade de ${esc(card.name)}">
-    <div class="card-head"><div><div class="card-label">Cartão fidelidade</div><div class="card-business">${esc(card.name || 'Seu negócio')}</div></div><div class="card-mark" aria-hidden="true">${esc(initials(card.name))}</div></div>
-    <div class="card-body"><div class="card-rule">A cada ${money(card.value)}, 1 carimbo</div><div class="stamps" aria-label="${count} de ${goal} carimbos neste cartão">${stamps}</div>
-      <div class="card-footer"><strong><span class="reward-icon" aria-hidden="true">✦</span>${esc(card.reward || 'Sua recompensa')}</strong><span>${goal} carimbos para ganhar</span></div>
-    </div>
-  </article>`;
-}
-
-function home() {
-  return `<main class="page"><section class="hero"><div class="hero-copy">
-    <h1>Seu cartão de fidelidade, pronto para circular.</h1>
-    <p class="lead">Crie o cartão, mostre o QR no balcão e deixe cada cliente acompanhar os carimbos. Experimente o fluxo antes de construir o produto definitivo.</p>
-    <div class="hero-actions"><a class="button button-primary" href="#criar">Criar cartão ${ICON.arrow}</a><a class="button button-secondary" href="#cliente">Ver como cliente</a></div>
-    <p class="microcopy home-note">Esta página é um protótipo. Todos os nomes e números são fictícios.</p>
-  </div><div class="hero-stage" aria-hidden="true"><div class="stage-card">${cardVisual(state.card, Math.min(state.card.goal,progress()))}</div><div class="stage-badge"><strong>${Math.min(state.card.goal,progress())} de ${state.card.goal}</strong>carimbos no cartão</div></div></section></main>`;
-}
-
-function colorPicker() {
-  return `<div class="field"><label>Cor do cartão</label><div class="swatches" role="group" aria-label="Cor do cartão">
-    <button type="button" class="swatch" style="background:#7541ee" data-action="theme" data-theme="purple" aria-label="Roxo IndiqAI" aria-pressed="${state.draft.theme==='purple'}"></button>
-    <button type="button" class="swatch" style="background:#b83773" data-action="theme" data-theme="berry" aria-label="Rosa" aria-pressed="${state.draft.theme==='berry'}"></button>
-    <button type="button" class="swatch" style="background:#24244b" data-action="theme" data-theme="night" aria-label="Azul escuro" aria-pressed="${state.draft.theme==='night'}"></button>
-  </div></div>`;
-}
-
-function qrMarkup() {
-  if (!onlineUrl()) return `<div class="qr-fallback">O QR fica disponível quando o protótipo está hospedado.</div>`;
-  try {
-    const qr = qrcode(0,'M');
-    qr.addData(shareUrl());
-    qr.make();
-    return qr.createSvgTag({cellSize:3,margin:0,scalable:true});
-  } catch (_) { return `<div class="qr-fallback">Não foi possível gerar o QR nesta sessão.</div>`; }
-}
-
-function builder() {
-  const title = step===1 ? 'Comece pelo nome.' : step===2 ? 'Defina o que o cliente ganha.' : 'Seu cartão está pronto.';
-  const intro = step===1 ? 'O cartão aparece enquanto você preenche. Depois, ajuste a regra e a recompensa.' : step===2 ? 'Uma regra só. O valor orienta o programa; no atendimento, você escolhe quantos carimbos aplicar.' : 'Compartilhe o QR, veja a experiência do cliente ou simule o primeiro carimbo.';
-  let body = '';
-  if (step===1) body = `<div class="form-grid">
-    <div class="field"><label for="business-name">Nome do negócio</label><input id="business-name" data-field="name" maxlength="32" value="${esc(state.draft.name)}" autocomplete="organization" placeholder="Ex.: Café Aurora"><small>É o nome que o cliente verá no cartão.</small></div>
-    ${colorPicker()}
-  </div><div class="builder-actions"><button class="button button-primary" type="button" data-action="next">Continuar ${ICON.arrow}</button></div>`;
-  if (step===2) body = `<div class="form-grid">
-    <div class="field-row"><div class="field"><label for="stamp-value">Valor por carimbo</label><div class="input-prefix"><input id="stamp-value" data-field="value" type="number" min="1" max="10000" step="1" value="${esc(state.draft.value)}" inputmode="numeric"></div><small>Valor de referência exibido no cartão.</small></div>
-      <div class="field"><label for="stamp-goal">Carimbos para ganhar</label><input id="stamp-goal" data-field="goal" type="number" min="1" max="12" step="1" value="${esc(state.draft.goal)}" inputmode="numeric"><small>De 1 a 12 no protótipo.</small></div></div>
-    <div class="field"><label for="reward-name">Qual é a recompensa?</label><input id="reward-name" data-field="reward" maxlength="32" value="${esc(state.draft.reward)}" placeholder="Ex.: Café especial"><small>Escreva como o cliente reconheceria o prêmio.</small></div>
-  </div><div class="builder-actions button-row"><button class="button button-secondary" type="button" data-action="back">Voltar</button><button class="button button-primary" type="button" data-action="next">Publicar cartão ${ICON.arrow}</button></div>`;
-  if (step===3) body = `<div class="done-panel"><h3>QR pronto para o balcão</h3><div class="qr-layout"><div class="qr-box" role="img" aria-label="QR para a visão do cliente">${qrMarkup()}</div><div class="qr-copy"><p>${location.hostname==='127.0.0.1'||location.hostname==='localhost'?'O QR aponta para esta máquina. Depois de hospedar, ele abre o cartão no celular.':'Ao escanear, o cliente abre este cartão no celular. Os carimbos da simulação não sincronizam entre aparelhos.'}</p>
-    <div class="inline-actions"><button class="button button-secondary" type="button" data-action="copy-link">Copiar link</button><a class="button button-quiet" href="#cliente">Ver como cliente ${ICON.arrow}</a></div></div></div></div>
-    <div class="builder-actions"><a class="button button-primary" href="#gestor">Simular carimbos ${ICON.arrow}</a></div>`;
-  return `<main class="page"><div class="steps"><div class="step-track" aria-hidden="true">${[1,2,3].map(n=>`<span class="step-bar ${n<=step?'is-done':''}"></span>`).join('')}</div><span class="step-label">${step} de 3</span></div>
-    <div class="builder-layout"><section class="builder-main"><h2 tabindex="-1">${title}</h2><p>${intro}</p>${body}<p class="error" id="form-error" role="alert"></p></section>
-    <aside class="preview-wrap"><p class="preview-title">O cartão que o cliente vai ver</p><div class="js-live-preview">${cardVisual(step===3?state.card:state.draft,0)}</div><p class="preview-hint">Prévia ilustrativa · sem dados reais</p></aside></div></main>`;
-}
-
-function customer() {
-  const current = Math.min(state.card.goal, progress());
-  const ready = availableRewards();
-  const remaining = Math.max(0, state.card.goal - current);
-  return `<main class="page"><div class="section-intro"><h2>O cartão da Marina.</h2><p>É assim que um cliente vê o progresso depois de entrar pelo QR. Nesta demonstração, a identificação já está simulada.</p></div>
-    <div class="state-layout"><section class="state-main"><div class="customer-head"><div class="avatar">M</div><div><strong>Marina</strong><span>Cliente fictícia · cartão de demonstração</span></div></div>
-      <div class="view-card">${cardVisual(state.card,current,lastAward)}</div>
-      <div class="progress-summary"><div><strong>${current}/${state.card.goal}</strong><p>carimbos no cartão</p></div><div><strong>${ready>0?'Pronto':remaining}</strong><p>${ready>0?'prêmio disponível':remaining===1?'carimbo para ganhar':'carimbos para ganhar'}</p></div></div>
-      <div class="reward-panel">${ICON.gift}<div><strong>${ready>0?`${ready} ${ready===1?'recompensa disponível':'recompensas disponíveis'}`:remaining<=2?`Falta pouco para ${esc(state.card.reward)}`:`Sua recompensa: ${esc(state.card.reward)}`}</strong><p>${ready>0?'Apresente o cartão ao gestor para receber o benefício.':`Junte ${state.card.goal} carimbos e ganhe ${esc(state.card.reward)}.`}</p></div></div>
-      <div class="button-row"><a class="button button-primary" href="#gestor">Simular atendimento ${ICON.arrow}</a></div>
-    </section><aside class="aside-note"><strong>Como funciona</strong>Mostre seu cartão no balcão. O gestor registra os carimbos e o progresso aparece aqui. Quando completar, apresente o cartão para receber a recompensa.</aside></div></main>`;
-}
-
-function eventList() {
-  if (!state.events.length) return `<p class="empty-state">${state.totalStamps>0?`O cartão começou com ${state.totalStamps} carimbos fictícios para facilitar a revisão.`:'Nenhum lançamento nesta sessão.'}</p>`;
-  return `<ul class="event-list">${state.events.slice(0,5).map(ev=>`<li><strong>${ev.type==='stamp'?`+${ev.amount} ${ev.amount===1?'carimbo':'carimbos'}`:'Recompensa entregue'}</strong><span>${esc(ev.time)}</span></li>`).join('')}</ul>`;
-}
-
-function manager() {
-  const current = Math.min(state.card.goal, progress());
-  const ready = availableRewards();
-  return `<main class="page"><div class="section-intro"><h2>Carimbe o cartão da Marina.</h2><p>Escolha quantos carimbos aplicar. O progresso muda na hora.</p></div>
-    <div class="state-layout manager-layout"><section class="state-main"><div class="view-card">${cardVisual(state.card,current,lastAward)}</div>
-      <div class="progress-summary"><div><strong>${current}/${state.card.goal}</strong><p>carimbos no cartão de Marina</p></div><div><strong>${ready}</strong><p>${ready===1?'prêmio disponível':'prêmios disponíveis'}</p></div></div>
-      ${ready>0?`<div class="reward-panel">${ICON.gift}<div><strong>${esc(state.card.reward)} disponível</strong><p>O gestor confirma a entrega. Carimbos excedentes permanecem no próximo ciclo nesta simulação.</p></div></div>`:''}
-      <hr class="section-divider"><h3>Atividade desta demonstração</h3>${eventList()}
-    </section><aside class="operator-panel"><h3>Aplicar carimbos</h3><div class="operator-person"><div class="avatar">M</div><div><strong>Marina</strong><span>Cartão de ${esc(state.card.name)}</span></div></div>
-      <span class="quantity-label">Quantos carimbos agora?</span><div class="quantity-control"><button type="button" data-action="decrease" aria-label="Diminuir quantidade" ${quantity<=1?'disabled':''}>−</button><output aria-live="polite">${quantity}</output><button type="button" data-action="increase" aria-label="Aumentar quantidade">+</button></div>
-      <p class="microcopy" style="margin:12px 0 0">Você decide a quantidade neste atendimento.</p><button class="button button-primary" type="button" data-action="award">Aplicar ${quantity} ${quantity===1?'carimbo':'carimbos'} ${ICON.arrow}</button>
-      ${ready>0?`<button class="button button-secondary" type="button" data-action="redeem">Marcar 1 recompensa como entregue</button>`:''}
-      <p class="operator-sub">Marina já está selecionada para a demonstração. Nenhum pagamento ou visita é verificado; o lançamento fica só neste navegador.</p>
-    </aside></div></main>`;
-}
-
-function render() {
-  const current = route();
-  const body = current==='criar'?builder():current==='cliente'?customer():current==='gestor'?manager():home();
-  app.innerHTML = `<div class="shell">${header(current)}${body}${footer()}</div>`;
-  document.title = `${current==='inicio'?'Protótipo':current==='criar'?'Criar cartão':current==='cliente'?'Visão do cliente':'Área do gestor'} · IndiqAI Card`;
-}
-
-function formError(message) { const target=document.querySelector('#form-error'); if (target) target.textContent=message; }
-function validStep() {
-  if (step===1 && !state.draft.name.trim()) { formError('Escreva o nome do negócio para continuar.'); document.querySelector('#business-name')?.focus(); return false; }
-  if (step===2) {
-    if (!Number.isInteger(Number(state.draft.value)) || Number(state.draft.value)<1 || Number(state.draft.value)>10000) { formError('Escolha um valor inteiro entre R$ 1 e R$ 10.000.'); document.querySelector('#stamp-value')?.focus(); return false; }
-    if (!Number.isInteger(Number(state.draft.goal)) || Number(state.draft.goal)<1 || Number(state.draft.goal)>12) { formError('Escolha de 1 a 12 carimbos.'); document.querySelector('#stamp-goal')?.focus(); return false; }
-    if (!state.draft.reward.trim()) { formError('Dê um nome à recompensa.'); document.querySelector('#reward-name')?.focus(); return false; }
-  }
-  return true;
-}
-
-document.addEventListener('input', event => {
-  const field = event.target?.dataset?.field;
-  if (!field) return;
-  state.draft[field] = event.target.value;
-  save();
-  formError('');
-  const preview = document.querySelector('.js-live-preview');
-  if (preview) preview.innerHTML = cardVisual(state.draft,0);
+(() => {
+'use strict';
+const KEY='indiqai-card-prototype-v2';
+const THEMES=[['orange','Laranja','#ee681e','#c43f08'],['red','Vermelho','#eb4b4c','#a61a2d'],['wine','Vinho','#bb244d','#6f072b'],['pink','Rosa','#df428d','#a31559'],['purple','Roxo','#8750f2','#49249f'],['blue','Azul','#477fec','#173f9a'],['teal','Turquesa','#20a5aa','#07585f'],['green','Verde','#30a167','#075c34'],['night','Grafite','#55596e','#1d2033']];
+const DEFAULT_CARD={name:'Lord Chicken',value:50,goal:10,reward:'Lord Bacon',rewardQty:1,theme:'orange',color:'#ee681e',invite:'Seu próximo burger está aqui.',logoMode:'initials',logo:'',cover:'reference'};
+const DEMO={card:DEFAULT_CARD,draft:{...DEFAULT_CARD,cover:''},people:[{id:'ana',name:'Ana',total:3,redeemed:0},{id:'marina',name:'Marina',total:9,redeemed:0},{id:'rafael',name:'Rafael',total:9,redeemed:0},{id:'beatriz',name:'Beatriz',total:10,redeemed:0}],events:[],fresh:false,published:true};
+const PATHS={
+back:'m14 18-6-6 6-6',arrow:'M5 12h14m-6-6 6 6-6 6',check:'m5 12 4 4L19 6',plus:'M12 5v14M5 12h14',minus:'M5 12h14',
+store:'M4 10v10h16V10M3 4h18l1 6H2l1-6Zm6 16v-6h6v6',card:'M3 5h18v14H3V5Zm0 5h18M7 15h4',
+users:'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M17 3a4 4 0 0 1 0 8M22 21v-2a4 4 0 0 0-3-3.87',
+gift:'M3 8h18v4H3V8Zm2 4v9h14v-9M12 8v13M12 8C6 8 5 5 7 3c3-2 5 5 5 5Zm0 0s2-7 5-5c2 2 1 5-5 5Z',
+qr:'M3 3h6v6H3V3Zm12 0h6v6h-6V3ZM3 15h6v6H3v-6Zm12 0h3v3h-3v-3Zm3 3h3v3h-3v-3M21 12h-6M12 3v9H3M12 15v6',
+image:'M3 3h18v18H3V3Zm0 13 6-6 5 5 3-3 4 4M16 7h.01',upload:'M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5',
+settings:'M4 6h16M4 12h16M4 18h16M8 3v6M16 9v6M10 15v6',heart:'M12 21 3 12C-3 5 6-1 12 6c6-7 15-1 9 6l-9 9Z',
+close:'m6 6 12 12M6 18 18 6',wallet:'M3 5h17v15H3V5Zm12 5h7v6h-7v-6M18 13h.01',download:'M12 3v12m-5-5 5 5 5-5M4 17v4h16v-4',
+chevron:'m9 5 7 7-7 7',burger:'M3 10C3 1 21 1 21 10H3Zm0 4h18M3 18h18M5 21h14M6 6h.01M12 5h.01M17 7h.01'};
+const app=document.querySelector('#app'),toast=document.querySelector('#toast');
+let editing=false,step=1,selected='ana',quantity=1,modal=null,timer,locked=false,newStamps=0;
+const clone=x=>JSON.parse(JSON.stringify(x));let state=load();
+function load(){try{const s=JSON.parse(localStorage.getItem(KEY));if(s?.card&&Array.isArray(s.people)&&s.people.length)return s;}catch(_){}return clone(DEMO);}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(state));}catch(_){notify('Não foi possível salvar. Tente uma imagem menor.');}}
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function icon(name){return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${PATHS[name]||PATHS.card}"/></svg>`;}
+function initial(name){return String(name||'Seu negócio').trim().split(/\s+/).slice(0,2).map(w=>w[0]).join('').toUpperCase();}
+function money(n){return new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL',maximumFractionDigits:0}).format(Number(n)||0);}
+function route(){const r=location.hash.slice(1).split('?')[0];return ['inicio','carteira','criar','cliente','gestor','carimbar','clientes','recompensas','gerenciar'].includes(r)?r:'inicio';}
+function person(){return state.people.find(p=>p.id===selected)||state.people[0];}
+function count(p=state.people[0]){return Math.max(0,p.total-p.redeemed*state.card.goal);}
+function ready(p=state.people[0]){return Math.max(0,Math.floor(p.total/state.card.goal)-p.redeemed);}
+function cardColors(c){const t=THEMES.find(t=>t[0]===c.theme)||THEMES[0];return c.theme==='custom'?[c.color,c.color]:[t[2],t[3]];}
+function lightCustom(c){if(c.theme!=='custom')return false;const rgb=c.color.slice(1).match(/../g).map(x=>{const v=parseInt(x,16)/255;return v<=0.04045?v/12.92:Math.pow((v+0.055)/1.055,2.4);});return rgb[0]*0.2126+rgb[1]*0.7152+rgb[2]*0.0722>0.179;}
+function notify(msg){toast.textContent=msg;toast.classList.add('show');clearTimeout(timer);timer=setTimeout(()=>toast.classList.remove('show'),3300);}
+function encode(obj){const bytes=new TextEncoder().encode(JSON.stringify(obj));return btoa(String.fromCharCode(...bytes)).replaceAll('+','-').replaceAll('/','_').replaceAll('=','');}
+function sharedConfig(){const c=state.card;return {...c,logo:'',logoMode:'initials',cover:c.cover==='reference'?'reference':''};}
+function shareUrl(){return location.href.split('#')[0]+'#cliente?card='+encode(sharedConfig());}
+function applyShared(){if(route()!=='cliente')return;const s=new URLSearchParams(location.hash.split('?')[1]||'').get('card');if(!s||s.length>1800)return;try{const c=JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(s.replaceAll('-','+').replaceAll('_','/')),x=>x.charCodeAt(0))));if(typeof c.name!=='string'||c.name.length>32||typeof c.reward!=='string'||c.reward.length>32||typeof c.invite!=='string'||c.invite.length>40||!Number.isInteger(c.goal)||c.goal<1||c.goal>12||!Number.isInteger(c.value)||c.value<1||c.value>10000||!Number.isInteger(c.rewardQty)||c.rewardQty<1||c.rewardQty>99||!['custom',...THEMES.map(t=>t[0])].includes(c.theme)||!/^#[0-9a-f]{6}$/i.test(c.color))return;c.cover=c.cover==='reference'?'reference':'';c.logo='';c.logoMode='initials';if(JSON.stringify(c)!==JSON.stringify(sharedConfig())){state.card=c;state.draft=clone(c);state.people=[{id:'ana',name:'Ana',total:0,redeemed:0}];state.events=[];state.fresh=true;save();}}catch(_){}}
+function logo(c){if(c.logoMode==='upload'&&c.logo.startsWith('data:image/'))return `<img src="${esc(c.logo)}" alt="">`;return esc(c.logoMode==='account'?'A':initial(c.name));}
+function cardVisual(c,filled=0,compact=false,rules=false,customer=false){
+const [a,b]=cardColors(c),goal=Math.max(1,Math.min(12,Number(c.goal)||10)),n=Math.min(goal,Math.max(0,filled));
+const cover=c.cover==='reference'?'reference':c.cover.startsWith('data:image/')?'uploaded':'gradient';
+const header=`<div class="card-cover ${cover}" ${cover==='uploaded'?`style="background-image:url('${esc(c.cover)}')"`:''}>${cover==='reference'?'':`<div class="card-identity"><span class="business-logo">${logo(c)}</span><span>${esc(c.name||'Seu negócio')}</span></div><strong class="card-invite">${esc(c.invite||'Volte sempre, ganhe mais.')}</strong>`}</div>`;
+const stamps=Array.from({length:goal},(_,i)=>`<span class="stamp ${i<n?'filled':''} ${i<n&&i>=n-newStamps?'new':''}" aria-label="${i<n?'Carimbo recebido':'Carimbo vazio'}">${icon(cover==='reference'?'burger':'check')}</span>`).join('');
+const content=rules?`<div class="card-rules"><p>${icon('card')} Ganhe 1 carimbo a cada ${money(c.value)}</p><p>${icon('heart')} Complete ${goal} carimbos</p><p>${icon('gift')} E ganhe ${c.rewardQty} ${esc(c.reward||'recompensa')}</p></div>`:`<div class="card-content"><div class="card-progress"><strong>${n} <span>de ${goal}</span></strong><span>${n===goal?'Prêmio disponível':'Faltam '+(goal-n)}</span></div>${compact?'':`<div class="progress-bar"><span style="width:${n/goal*100}%"></span></div>`}<div class="stamps" style="--cols:${Math.min(goal,7)}" aria-label="${n} de ${goal} carimbos">${stamps}</div>${compact?'':`<div class="prize">${icon('burger')}<div><span>Complete ${goal} e ganhe</span><strong>${c.rewardQty} ${esc(c.reward||'recompensa')}</strong></div></div>`}${customer?`<button class="button white qr-trigger" data-action="customer-qr">${icon('qr')} Mostrar meu QR</button><div class="card-credit"><span>Mais sabor nas suas visitas</span><span>Powered by <b>IndiqAI</b></span></div>`:''}</div>`;
+return `<article class="loyalty-card ${compact?'compact':''} ${lightCustom(c)?'light-card':''}" style="--card-a:${a};--card-b:${b}" aria-label="Cartão de ${esc(c.name)}">${header}${content}</article>`;}
+function brand(){return '<a class="brand" href="#inicio">Indiq<span>AI</span></a>';}
+function top(title='',back='carteira'){return `<header class="app-top">${title?`<a class="icon-button" href="#${back}" aria-label="Voltar">${icon('back')}</a><h1>${title}</h1>`:brand()}<span class="demo-badge">Protótipo</span></header>`;}
+function managerNav(current){return `<nav class="bottom-nav" aria-label="Navegação do negócio">${[['gestor','card','Meu cartão'],['clientes','users','Clientes'],['recompensas','gift','Prêmios'],['gerenciar','settings','Gerenciar']].map(([r,i,t])=>`<a href="#${r}" ${current===r?'aria-current="page"':''}>${icon(i)}<span>${t}</span></a>`).join('')}</nav>`;}
+function footer(){return '<footer class="demo-footer"><span>Dados fictícios · salvos neste navegador</span><button data-action="reset">Recomeçar</button></footer>';}
+function entry(){return `<div class="entry"><div class="entry-purple">${brand()}<span class="demo-badge">Protótipo · dados fictícios</span><div><span class="eyebrow">PARA O SEU NEGÓCIO</span><h1>Seu cartão fidelidade<br>em 3 passos.</h1><p>Um bom motivo para o cliente voltar.</p></div></div><section class="entry-sheet"><ol class="entry-steps"><li><span>1</span>Nome e logo da empresa</li><li><span>2</span>Cores, fundo e convite</li><li><span>3</span>Como o cliente ganha o prêmio</li></ol><div class="entry-actions"><button class="button primary" data-action="login" data-provider="Google">Continuar com Google</button><button class="button black" data-action="login" data-provider="Apple">Continuar com Apple</button><p>Login simulado. Nenhuma conta será criada.</p><a href="#carteira">Já sou cliente · ver meus cartões ${icon('arrow')}</a><a class="text-link" href="#gestor">Explorar o painel da empresa</a></div></section></div>`;}
+function wallet(){return `${top()}<main class="page"><div class="greeting"><div class="avatar">A</div><div><span>Olá, Ana</span><h1>Meus cartões</h1></div><a class="icon-button" href="#gestor" aria-label="Ir para meu negócio">${icon('store')}</a></div><a class="wallet-card" href="#cliente">${cardVisual(state.card,Math.min(state.card.goal,count()),true)}<span class="wallet-link">Ver meu cartão ${icon('chevron')}</span></a><section class="business-invite"><span class="invite-icon">${icon('store')}</span><h2>Tem um negócio? Crie o cartão fidelidade da sua empresa.</h2><p>Com esta mesma conta, em 3 passos.</p><button class="button primary" data-action="start">Criar cartão da empresa</button></section></main>`;}
+function stepper(label,n,min,max,action){const frozen=action==='goal'&&editing&&state.people.some(p=>p.total>0);return `<div class="stepper"><span>${label}</span><div><button class="icon-button" data-action="${action}" data-delta="-1" aria-label="Diminuir ${label}" ${n<=min||frozen?'disabled':''}>${icon('minus')}</button><output>${n}</output><button class="icon-button accent" data-action="${action}" data-delta="1" aria-label="Aumentar ${label}" ${n>=max||frozen?'disabled':''}>${icon('plus')}</button></div></div>`;}
+function builder(){
+if(step===4)return done();const c=state.draft;
+const head=`<div class="onboard-top"><button class="icon-button" data-action="back" aria-label="Voltar">${icon('back')}</button><div class="step-track">${[1,2,3].map(i=>`<span class="${i<=step?'active':''}"></span>`).join('')}</div><span>${step} de 3</span></div>`;let fields='';
+if(step===1)fields=`<h1>Qual é o nome da sua empresa?</h1><p class="subcopy">É assim que seus clientes vão ver você.</p><label class="field">Nome da empresa<input data-field="name" maxlength="32" value="${esc(c.name)}" placeholder="Ex.: Lord Chicken" autocomplete="organization"></label><fieldset><legend>Logo</legend><div class="logo-options">${[['account','Foto da conta','A'],['upload','Enviar logo',icon('upload')],['initials','Iniciais',initial(c.name)]].map(([id,text,mark])=>`<button class="choice ${c.logoMode===id?'selected':''}" data-action="logo" data-mode="${id}"><span class="choice-mark ${id==='initials'?'initials':''}" style="--mark:${cardColors(c)[0]}">${id==='upload'&&c.logo?logo({...c,logoMode:'upload'}):mark}</span>${text}</button>`).join('')}</div></fieldset><p class="hint">A logo enviada fica apenas neste navegador.</p>`;
+if(step===2)fields=`<h1>Deixe o cartão com a sua cara.</h1><fieldset><legend>Cor do cartão</legend><div class="swatches">${THEMES.map(([id,label,a,b])=>`<button class="swatch ${c.theme===id?'selected':''}" style="background:linear-gradient(145deg,${a},${b})" data-action="theme" data-theme="${id}" aria-label="${label}" aria-pressed="${c.theme===id}"></button>`).join('')}<label class="custom-color" aria-label="Personalizar cor">${icon('plus')}<input type="color" data-field="color" value="${esc(c.color)}" aria-label="Personalizar cor"></label></div></fieldset><fieldset><legend>Fundo do topo</legend><div class="cover-options"><button class="choice ${!c.cover?'selected':''}" data-action="cover-color">${icon('card')} Usar a cor</button><button class="choice ${c.cover?'selected':''}" data-action="cover-upload">${icon('image')} Enviar imagem</button></div></fieldset><label class="field">Texto convidativo <span class="counter" id="invite-count">${c.invite.length}/40</span><input data-field="invite" maxlength="40" value="${esc(c.invite)}" placeholder="Volte sempre, ganhe mais."></label><div class="suggestions"><button data-action="suggest" data-text="Seu próximo burger está aqui.">Seu próximo burger está aqui.</button><button data-action="suggest" data-text="Volte sempre, ganhe mais.">Volte sempre, ganhe mais.</button></div><p class="hint">Imagens enviadas ficam neste navegador.</p>`;
+if(step===3)fields=`<h1>Como o cliente ganha?</h1><label class="field">Ganhe 1 carimbo a cada<div class="money-input"><span>R$</span><input data-field="value" type="number" inputmode="numeric" min="1" max="10000" step="1" value="${esc(c.value)}" aria-label="Valor de referência por carimbo"></div></label><p class="hint">O valor aparece no cartão. Você decide quantos carimbos aplicar em cada atendimento.</p> ${stepper('Complete',Number(c.goal),1,12,'goal')}${editing&&state.people.some(p=>p.total>0)?'<p class="hint">Meta preservada para manter os carimbos existentes. Para mudar, recomece a demonstração.</p>':''}<label class="field reward-field">E ganhe<div><input type="number" data-field="rewardQty" min="1" max="99" value="${esc(c.rewardQty)}" aria-label="Quantidade da recompensa"><input data-field="reward" maxlength="32" value="${esc(c.reward)}" placeholder="Nome da recompensa" aria-label="Nome da recompensa"></div></label>`;
+return `<main class="onboarding">${head}<div class="builder-grid"><div class="live-preview ${step===1?'stage-one':''}">${cardVisual(c,0,true,step===3)}</div><section class="builder-fields">${fields}<p id="form-error" class="error" role="alert"></p></section></div><div class="onboard-actions"><button class="button primary" data-action="next">${step===3?(editing?'Atualizar cartão':'Criar meu cartão'):'Continuar'}</button><span>${icon('wallet')} Usando a mesma conta da Ana</span></div><input id="logo-file" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" data-upload="logo"><input id="cover-file" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" data-upload="cover"></main>`;}
+function qrMarkup(url){try{const q=qrcode(0,'M');q.addData(url);q.make();return q.createSvgTag({cellSize:3,margin:3,scalable:true});}catch(_){return '<p>O QR precisa de um endereço hospedado.</p>';}}
+function done(){return `<main class="success"><div class="success-head"><span class="success-check">${icon('check')}</span><h1>Cartão criado<br>com sucesso!</h1><p>É assim que seu cliente vai ver.</p></div>${cardVisual(state.card,0)}<section class="qr-panel"><button class="qr-code" data-action="business-qr" aria-label="Ampliar QR do balcão">${qrMarkup(shareUrl())}</button><div><strong>QR do balcão</strong><button class="button outline small" data-action="download-qr">${icon('download')} Baixar QR</button><button class="button outline small" data-action="share">Compartilhar link</button></div></section><p class="success-note">QR compartilha o cartão. Carimbos não sincronizam entre aparelhos nesta demonstração.</p><a class="button white" href="#gestor">Ir para o painel ${icon('arrow')}</a></main>`;}
+function customer(){const p=state.people[0];return `${top('Meu cartão')}<main class="page customer-page">${cardVisual(state.card,count(p),false,false,true)}<button class="wallet-add" data-action="wallet">${icon('wallet')}<span>Adicionar à Wallet</span>${icon('chevron')}</button><p class="center hint">Tenha seu cartão sempre com você.</p><div class="customer-rule">A cada ${money(state.card.value)}, 1 carimbo.<br>Mostre seu QR no atendimento.</div>${ready(p)?`<div class="reward-notice">${icon('gift')}<div><strong>${ready(p)} recompensa disponível</strong><p>Apresente seu cartão para receber o prêmio.</p></div></div>`:''}</main>`;}
+function managerHeader(title){return `<header class="manager-head"><div>${brand()}<h1>${title}</h1><span>${esc(state.card.name)}</span></div><a href="#carteira" class="avatar" aria-label="Ver meus cartões como cliente">A</a></header>`;}
+function dashboard(){const fresh=state.fresh;return `${managerHeader('Meu cartão')}<main class="page manager-page"><div class="period"><span>Últimos 30 dias</span><span class="status">Ativo</span></div><section class="result-hero"><span class="eyebrow">SEU CARTÃO EM 30 DIAS</span><h2>${fresh?'Seu cartão está começando.':'Seus clientes estão voltando.'}</h2><div class="result-number">${fresh?0:27}<span>clientes que voltaram</span></div><p>${fresh?'O histórico de retorno vai aparecer aqui conforme o programa for usado.':'Juntos, eles registraram 43 visitas de retorno neste cenário de demonstração.'}</p><span class="result-label">Dados fictícios · sem receita estimada por carimbo</span></section><a class="button primary main-action" href="#carimbar">${icon('qr')} Aplicar carimbos</a><section class="health"><h2>Como está seu cartão?</h2><dl><div><dt>Clientes com cartão</dt><dd>${fresh?state.people.length:186}</dd></div><div><dt>Novos clientes no período</dt><dd>${fresh?state.people.length:34}</dd></div><div><dt>Recompensas entregues</dt><dd>${(fresh?0:8)+state.events.filter(e=>e.type==='reward').length}</dd></div></dl></section><section class="opportunity"><span class="eyebrow">SUA PRÓXIMA OPORTUNIDADE</span><h2>${fresh?'Convide seus primeiros clientes.':state.people.filter(p=>count(p)>=state.card.goal-1&&!ready(p)).length+' clientes estão perto da recompensa.'}</h2><p>${fresh?'Deixe o QR visível no balcão para o cliente começar.':'Eles estão a um carimbo de completar o cartão. Veja quem são para reconhecer no atendimento.'}</p><a href="#${fresh?'gerenciar':'clientes'}" class="text-link">${fresh?'Ver QR do balcão':'Ver esses clientes'} ${icon('arrow')}</a></section><a class="program-summary" href="#gerenciar"><span class="mini-logo" style="background:${cardColors(state.card)[0]}">${initial(state.card.name)}</span><div><strong>Seu programa</strong><span>${state.card.goal} carimbos = ${state.card.rewardQty} ${esc(state.card.reward)}</span></div>${icon('chevron')}</a><p class="hint">Sem valor de compra registrado, o painel acompanha uso e retorno. Não calcula faturamento a partir dos carimbos.</p></main>${managerNav('gestor')}`;}
+function customerRow(p){return `<button class="person-row" data-action="select-person" data-id="${p.id}"><span class="avatar">${initial(p.name)}</span><span><strong>${esc(p.name)}</strong><small>${Math.min(state.card.goal,count(p))} de ${state.card.goal} carimbos ${ready(p)?'· prêmio disponível':''}</small></span>${icon('chevron')}</button>`;}
+function customers(){const near=state.people.filter(p=>count(p)>=state.card.goal-1&&!ready(p));return `${managerHeader('Clientes')}<main class="page"><div class="list-intro"><span class="eyebrow">PERTO DA RECOMPENSA</span><h2>Um bom motivo<br>para voltar.</h2><p>Toque em um cliente para abrir o atendimento. Esta lista contém apenas exemplos.</p></div><section class="people-list">${near.map(customerRow).join('')||'<p class="hint">Ainda não há clientes a um carimbo da recompensa.</p>'}</section><h2 class="list-heading">Clientes da demonstração</h2><section class="people-list">${state.people.filter(p=>!near.includes(p)).map(customerRow).join('')}</section><p class="hint">Mensageria ficará para a próxima etapa.</p></main>${managerNav('clientes')}`;}
+function rewards(){const people=state.people.filter(p=>ready(p));return `${managerHeader('Recompensas')}<main class="page"><div class="list-intro"><span class="eyebrow">TEM PRESENTE ESPERANDO</span><h2>${people.length?'Prêmios prontos para entregar.':'As próximas conquistas aparecem aqui.'}</h2><p>O gestor confirma a entrega no atendimento.</p></div><section class="people-list">${people.map(customerRow).join('')||'<div class="empty"><span>'+icon('gift')+'</span><p>Nenhuma recompensa disponível nesta demonstração.</p><a href="#carimbar" class="text-link">Simular carimbos '+icon('arrow')+'</a></div>'}</section><h2 class="list-heading">Entregas nesta sessão</h2>${eventList('reward')}</main>${managerNav('recompensas')}`;}
+function manage(){return `${managerHeader('Gerenciar cartão')}<main class="page"><div class="manage-preview">${cardVisual(state.card,0,true)}</div><section class="manage-options"><button class="person-row" data-action="edit">${icon('settings')}<span><strong>Editar meu cartão</strong><small>Marca, aparência e recompensa</small></span>${icon('chevron')}</button><button class="person-row" data-action="business-qr">${icon('qr')}<span><strong>QR do balcão</strong><small>Compartilhe com seus clientes</small></span>${icon('chevron')}</button><a class="person-row" href="#cliente">${icon('card')}<span><strong>Ver como cliente</strong><small>Confira a experiência completa</small></span>${icon('chevron')}</a></section><div class="local-note">${icon('store')}<p>Um negócio, um cartão. A conta da Ana também guarda seus cartões como cliente.</p></div></main>${managerNav('gerenciar')}`;}
+function eventList(type){const list=state.events.filter(e=>!type||e.type===type).slice(0,8);return `<ul class="event-list">${list.map(e=>`<li><span><strong>${e.type==='stamp'?'+'+e.amount+' carimbos':'Recompensa entregue'}</strong><small>${esc(e.name)}</small></span><time>${esc(e.time)}</time></li>`).join('')||'<li class="hint">Nenhum lançamento nesta sessão.</li>'}</ul>`;}
+function stampPage(){const p=person();return `${top('Aplicar carimbos','gestor')}<main class="page stamp-page"><div class="identified"><span class="avatar">${initial(p.name)}</span><div><span>CLIENTE IDENTIFICADO</span><h2>${esc(p.name)}</h2><p>Cartão ${esc(state.card.name)}</p></div><a href="#clientes" class="text-link">Trocar</a></div><div class="stamp-preview">${cardVisual(state.card,count(p),true)}</div><section class="stamp-controls"><h2>Quantos carimbos agora?</h2><p>Você decide a quantidade neste atendimento.</p>${stepper('Carimbos',quantity,1,99,'quantity')}<button class="button primary" data-action="award">Aplicar ${quantity} ${quantity===1?'carimbo':'carimbos'} ${icon('check')}</button>${ready(p)?`<div class="reward-notice">${icon('gift')}<div><strong>${ready(p)} ${ready(p)===1?'recompensa disponível':'recompensas disponíveis'}</strong><p>${state.card.rewardQty} ${esc(state.card.reward)}</p></div></div><button class="button outline" data-action="redeem">Marcar 1 recompensa como entregue</button>`:''}</section><h2 class="list-heading">Atividade desta sessão</h2>${eventList()}<p class="hint">Nenhuma compra, pagamento ou visita é verificada. Lançamentos ficam neste navegador.</p></main>`;}
+function sheet(){if(!modal)return '';let body='';
+if(modal==='customer-qr')body=`<h2>Seu QR no atendimento</h2><p>Mostre este código ao gestor para identificar seu cartão.</p><div class="sheet-qr">${qrMarkup(location.href.split('#')[0]+'#carimbar?cliente=ana')}</div><span class="hint">Ana · demonstração sem identificação real</span><a class="button primary" href="#carimbar?cliente=ana" data-action="close">Simular leitura do gestor</a>`;
+if(modal==='business-qr')body=`<h2>QR do balcão</h2><p>O cliente abre seu cartão ao escanear.</p><div class="sheet-qr">${qrMarkup(shareUrl())}</div><button class="button primary" data-action="share">Compartilhar link</button><button class="button outline" data-action="download-qr">Baixar QR para imprimir</button><p class="hint">A configuração é compartilhada. Os carimbos continuam locais.</p>`;
+if(modal==='wallet')body=`<span class="sheet-symbol">${icon('wallet')}</span><h2>Seu cartão sempre com você.</h2><p>No produto real, esta etapa adicionará o cartão à Apple ou Google Wallet. Aqui é apenas uma simulação visual.</p><button class="button primary" data-action="wallet-done">Simular cartão adicionado</button>`;
+if(modal==='reset')body=`<h2>Recomeçar a demonstração?</h2><p>Isso restaura o cartão de exemplo e apaga os lançamentos fictícios deste navegador.</p><button class="button primary" data-action="confirm-reset">Recomeçar</button><button class="button outline" data-action="close">Continuar explorando</button>`;return `<div class="modal-backdrop" data-action="dismiss"><section class="sheet" role="dialog" aria-modal="true" aria-label="Detalhes do cartão"><button class="icon-button sheet-close" data-action="close" aria-label="Fechar">${icon('close')}</button>${body}</section></div>`;}
+function render(){const r=route(),content=({inicio:entry,carteira:wallet,criar:builder,cliente:customer,gestor:dashboard,carimbar:stampPage,clientes:customers,recompensas:rewards,gerenciar:manage})[r]();app.innerHTML=`<div class="app-shell ${r==='inicio'?'entry-shell':''} ${r==='criar'&&step===4?'success-shell':''}">${content}${r==='criar'||r==='inicio'?'':footer()}</div>${sheet()}`;document.title='IndiqAI · '+({inicio:'Começar',carteira:'Meus cartões',criar:'Criar cartão',cliente:'Meu cartão',gestor:'Meu negócio',carimbar:'Aplicar carimbos',clientes:'Clientes',recompensas:'Recompensas',gerenciar:'Gerenciar'}[r]);if(modal)document.querySelector('.sheet-close')?.focus();}
+function preview(){const el=document.querySelector('.live-preview');if(el)el.innerHTML=cardVisual(state.draft,0,true,step===3);const counter=document.querySelector('#invite-count');if(counter)counter.textContent=state.draft.invite.length+'/40';}
+function error(msg){document.querySelector('#form-error').textContent=msg;}
+function valid(){const c=state.draft;if(step===1&&!c.name.trim()){error('Escreva o nome da empresa.');return false;}if(step===2&&!c.invite.trim()){error('Escreva um convite para o cliente.');return false;}if(step===3&&(!Number.isInteger(Number(c.value))||c.value<1||c.value>10000||!c.reward.trim()||!Number.isInteger(Number(c.rewardQty))||c.rewardQty<1||c.rewardQty>99)){error('Informe um valor inteiro entre R$ 1 e R$ 10.000 e uma recompensa válida.');return false;}return true;}
+document.addEventListener('input',e=>{const field=e.target.dataset.field;if(!field)return;state.draft[field]=e.target.value;if(field==='color')state.draft.theme='custom';save();preview();});
+document.addEventListener('change',e=>{const kind=e.target.dataset.upload;if(!kind)return;const file=e.target.files?.[0];if(!file)return;if(!['image/png','image/jpeg','image/webp'].includes(file.type)||file.size>2*1024*1024){notify('Use JPG, PNG ou WebP de até 2 MB.');return;}const reader=new FileReader();reader.onload=()=>{if(kind==='logo'){state.draft.logo=reader.result;state.draft.logoMode='upload';}else state.draft.cover=reader.result;save();render();};reader.readAsDataURL(file);});
+document.addEventListener('click',async e=>{
+const target=e.target.closest('[data-action]');if(!target)return;const action=target.dataset.action;if(action==='dismiss'&&e.target!==target)return;
+if(action==='start'||action==='login'){editing=false;state.draft=clone(DEFAULT_CARD);state.draft.cover='';step=1;location.hash='criar';render();if(action==='login')notify('Entrada com '+target.dataset.provider+' simulada.');}
+if(action==='edit'){editing=true;state.draft=clone(state.card);if(state.draft.cover==='reference')state.draft.cover='';step=1;location.hash='criar';render();}
+if(action==='back'){if(step>1){step--;render();}else location.hash='carteira';}
+if(action==='next'){if(!valid())return;if(step===3){state.card={...state.draft,value:Number(state.draft.value),rewardQty:Number(state.draft.rewardQty),goal:Number(state.draft.goal)};if(!editing){state.people=[{id:'ana',name:'Ana',total:0,redeemed:0}];state.events=[];state.fresh=true;}state.published=true;save();}step++;render();window.scrollTo(0,0);}
+if(action==='logo'){if(target.dataset.mode==='upload')document.querySelector('#logo-file').click();else{state.draft.logoMode=target.dataset.mode;save();render();}}
+if(action==='theme'){state.draft.theme=target.dataset.theme;state.draft.color=THEMES.find(t=>t[0]===target.dataset.theme)[2];save();render();}
+if(action==='cover-color'){state.draft.cover='';save();render();}
+if(action==='cover-upload')document.querySelector('#cover-file').click();
+if(action==='suggest'){state.draft.invite=target.dataset.text;save();render();}
+if(action==='goal'){if(editing&&state.people.some(p=>p.total>0)){notify('Recomece a demonstração para alterar a meta.');return;}state.draft.goal=Math.max(1,Math.min(12,Number(state.draft.goal)+Number(target.dataset.delta)));save();render();}
+if(action==='quantity'){quantity=Math.max(1,Math.min(99,quantity+Number(target.dataset.delta)));render();}
+if(action==='select-person'){selected=target.dataset.id;quantity=1;location.hash='carimbar';}
+if(action==='award'){if(locked)return;locked=true;const p=person(),n=quantity;p.total+=n;state.events.unshift({type:'stamp',amount:n,name:p.name,time:new Intl.DateTimeFormat('pt-BR',{timeStyle:'short'}).format(new Date())});newStamps=n;quantity=1;save();render();notify('+'+n+' '+(n===1?'carimbo':'carimbos')+' para '+p.name+'.');setTimeout(()=>{locked=false;newStamps=0;},650);}
+if(action==='redeem'){const p=person();if(!ready(p))return;p.redeemed++;state.events.unshift({type:'reward',name:p.name,time:new Intl.DateTimeFormat('pt-BR',{timeStyle:'short'}).format(new Date())});save();render();notify('Recompensa marcada como entregue.');}
+if(['customer-qr','business-qr','wallet'].includes(action)){modal=action;render();}
+if(['close','dismiss'].includes(action)){modal=null;render();}
+if(action==='wallet-done'){modal=null;render();notify('Cartão adicionado · simulação.');}
+if(action==='share'){try{await navigator.clipboard.writeText(shareUrl());notify('Link do cartão copiado.');}catch(_){modal=null;render();notify('Não foi possível copiar. Use o QR para abrir o cartão.');}}
+if(action==='download-qr'){const svg=qrMarkup(shareUrl()),blob=new Blob([svg],{type:'image/svg+xml'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='indiqai-qr-balcao.svg';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);notify('QR baixado para imprimir.');}
+if(action==='reset'){modal='reset';render();}if(action==='confirm-reset'){editing=false;state=clone(DEMO);step=1;selected='ana';quantity=1;modal=null;save();location.hash='inicio';render();notify('Demonstração reiniciada.');}
 });
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&modal){modal=null;render();}});
+window.addEventListener('hashchange',()=>{modal=null;const incomingPerson=new URLSearchParams(location.hash.split('?')[1]||'').get('cliente');if(route()==='carimbar'&&state.people.some(p=>p.id===incomingPerson))selected=incomingPerson;applyShared();render();window.scrollTo(0,0);});
+applyShared();render();
 
-document.addEventListener('click', async event => {
-  const button = event.target.closest('[data-action]');
-  if (!button) return;
-  const action = button.dataset.action;
-  if (action==='theme') { state.draft.theme=button.dataset.theme; save(); render(); return; }
-  if (action==='back') { step=Math.max(1,step-1); render(); return; }
-  if (action==='next') {
-    if (!validStep()) return;
-    if (step===2) {
-      state.card = {...state.draft,value:Number(state.draft.value),goal:Number(state.draft.goal)};
-      state.totalStamps=0; state.redeemedRewards=0; state.events=[]; state.published=true;
-      save();
-    }
-    step=Math.min(3,step+1); render(); document.querySelector('.builder-main h2')?.focus(); return;
-  }
-  if (action==='increase') { quantity=Math.min(99,quantity+1); render(); return; }
-  if (action==='decrease') { quantity=Math.max(1,quantity-1); render(); return; }
-  if (action==='award') {
-    if (awardLocked) return;
-    awardLocked=true;
-    const amount=quantity;
-    state.totalStamps+=amount;
-    state.events.unshift({type:'stamp',amount,time:new Intl.DateTimeFormat('pt-BR',{dateStyle:'short',timeStyle:'short'}).format(new Date())});
-    lastAward=amount; quantity=1; save(); render();
-    notify(`${amount} ${amount===1?'carimbo aplicado':'carimbos aplicados'} no cartão de Marina.`);
-    setTimeout(()=>{awardLocked=false;lastAward=0;},700);
-    return;
-  }
-  if (action==='redeem') {
-    if (availableRewards()<=0) return;
-    state.redeemedRewards+=1;
-    state.events.unshift({type:'reward',amount:1,time:new Intl.DateTimeFormat('pt-BR',{dateStyle:'short',timeStyle:'short'}).format(new Date())});
-    lastAward=0; save(); render(); notify('Recompensa marcada como entregue.'); return;
-  }
-  if (action==='copy-link') {
-    if (!onlineUrl()) { notify('Hospede o protótipo para compartilhar o link pelo celular.'); return; }
-    try { await navigator.clipboard.writeText(shareUrl()); notify('Link do cartão copiado.'); }
-    catch (_) { notify('Não foi possível copiar. Use o endereço desta página com #cliente.'); }
-    return;
-  }
-  if (action==='reset') {
-    if (!confirm('Recomeçar a demonstração e apagar os carimbos fictícios deste navegador?')) return;
-    localStorage.removeItem(STORAGE_KEY); state=clone(DEMO); step=1; quantity=1; lastAward=0; location.hash='inicio'; render(); notify('Demonstração reiniciada.');
-  }
-});
 
-window.addEventListener('hashchange', () => { applySharedCard(); render(); window.scrollTo({top:0,behavior:'instant'}); });
-applySharedCard();
-render();
+})();

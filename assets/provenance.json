@@ -1,0 +1,7 @@
+{
+  "lord-chicken-reference.png": {
+    "origin": "Imagem incorporada na página 3 do PDF IndiqAI_Arquitetura_Dashboard_Fidelidade.pdf fornecido pelo usuário como referência visual.",
+    "use": "Capa do cartão demonstrativo; apenas a região de fotografia é enquadrada por CSS. A interface, os selos e os controles são implementados em HTML/CSS/JavaScript.",
+    "generated": false
+  }
+}
